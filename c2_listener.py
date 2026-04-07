@@ -13,6 +13,8 @@ CORS(app)
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "default_secret")
+
 command_queue = {}
 
 # ---------------------------------------------------------
@@ -48,11 +50,11 @@ def geolocate_ip(ip):
 # ---------------------------------------------------------
 # DASHBOARD ENDPOINTS (Proxy to Supabase)
 # ---------------------------------------------------------
-@app.route('/node/<device_id>', methods=['GET'])
-def get_single_node(device_id):
-    """Fetches summary data (IP, OS, Last Seen, Location) for ONE node."""
-    if not SUPABASE_KEY or not SUPABASE_URL:
-        return jsonify({"error": "Supabase key/URL missing in Render Environment"}), 500
+@app.route('/logs/<device_id>', methods=['GET'])
+def get_logs(device_id):
+    # Check if the frontend sent the correct password in the headers
+    if request.headers.get("Authorization") != f"Bearer {ADMIN_PASSWORD}":
+        return jsonify({"error": "Unauthorized"}), 401
 
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
     
