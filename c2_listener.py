@@ -35,12 +35,12 @@ def geolocate_ip(ip):
     if not ip or ip in ["127.0.0.1", "Unknown"]: 
         return 28.5383, -81.3792 
     try:
-        # Changed to ip-api.com: Much more reliable on Render
+        # Using ip-api.com: Highly reliable on cloud servers
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
         if response.ok:
             data = response.json()
             if data.get("status") == "success":
-                return data.get("lat"), data.get("lon")
+                return float(data.get("lat")), float(data.get("lon"))
     except:
         pass
     return 28.5383, -81.3792 # Fallback to Florida
@@ -75,7 +75,6 @@ def get_single_node(device_id):
         os_info, ip_info = "Windows (Assumed)", "Unknown IP"
         if sysinfo_resp.ok and sysinfo_resp.json():
             content = sysinfo_resp.json()[0]['content']
-            # Fixed parsing logic to accurately grab Windows OS string
             for line in content.split('\n'):
                 if line.startswith('Caption='): 
                     os_info = line.split('=')[-1].strip()
