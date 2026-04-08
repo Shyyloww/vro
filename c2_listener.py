@@ -150,8 +150,11 @@ def get_logs(device_id):
     except requests.exceptions.RequestException: 
         return jsonify({"error": "Database fetch failed"}), 500
 
-@app.route('/frames/<device_id>/<cache_key>', methods=['GET'])
+@app.route('/frames/<device_id>/<cache_key>', methods=['GET', 'OPTIONS'])
 def get_frame(device_id, cache_key):
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+        
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized access"}), 401
 
@@ -163,8 +166,11 @@ def get_frame(device_id, cache_key):
     else:
         return jsonify({"error": "Frame not available"}), 404
 
-@app.route('/fs/<device_id>', methods=['GET'])
+@app.route('/fs/<device_id>', methods=['GET', 'OPTIONS'])
 def get_fs_data(device_id):
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized access"}), 401
 
@@ -179,8 +185,11 @@ def get_fs_data(device_id):
     else:
         return jsonify({"error": "Filesystem data not available"}), 404
 
-@app.route('/fs_download/<device_id>', methods=['GET'])
+@app.route('/fs_download/<device_id>', methods=['GET', 'OPTIONS'])
 def get_fs_download(device_id):
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+        
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized access"}), 401
         
