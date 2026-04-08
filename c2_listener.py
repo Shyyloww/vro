@@ -2,31 +2,20 @@
 import os
 import json
 import requests
+import traceback
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
 
-# ==================================================================
-# --- MANUAL CORS OVERRIDE (BYPASS FLASK-CORS) ---
-# ==================================================================
-@app.after_request
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Dashboard-Password, Accept'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
-    return response
-
-# Catch all preflight OPTIONS requests directly and approve them
-@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
-@app.route('/<path:path>', methods=['OPTIONS'])
-def handle_options(path):
-    return '', 200
+# The simplest, most permissive CORS setup possible. Allows ALL headers and origins.
+CORS(app)
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    # If the backend fails, this forces it to send the error to the dashboard
     return jsonify({"error": f"Backend Error: {str(e)}"}), 500
-# ==================================================================
 
 # Credentials from Render Environment Variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
